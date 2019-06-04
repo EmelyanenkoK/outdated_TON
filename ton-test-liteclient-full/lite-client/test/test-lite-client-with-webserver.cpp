@@ -183,6 +183,7 @@ class TestNode : public td::actor::Actor {
   void get_server_time_web(std::shared_ptr<HttpServer::Response> response);
   void get_account_state_web(std::string address, std::string ref_blkid_str, std::shared_ptr<HttpServer::Response> response);
   void get_block_web(std::string blkid_str, std::shared_ptr<HttpServer::Response> response, bool dump = true);
+  void get_server_mc_block_id_web(std::shared_ptr<HttpServer::Response> response);
 
   TestNode() {
   }
@@ -461,6 +462,29 @@ void TestNode::got_server_mc_block_id_silent(ton::BlockIdExt blkid, ton::ZeroSta
   } else if (mc_last_id_.id.seqno < blkid.id.seqno) {
     mc_last_id_ = blkid;
   }
+}
+
+void TestNode::get_server_mc_block_id_web(std::shared_ptr<HttpServer::Response> response) {
+  auto b = ton::serialize_tl_object(ton::create_tl_object<ton::ton_api::liteServer_getMasterchainInfo>(), true);
+  envelope_send_query(std::move(b), [Self = actor_id(this), response](td::Result<td::BufferSlice> res)->void {
+    if (res.is_error()) {
+      response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                          "{'error':'cannot get masterchain info from server'}");
+      return;
+    } else {
+      auto F = ton::fetch_tl_object<ton::ton_api::liteServer_masterchainInfo>(res.move_as_ok(), true);
+      if (F.is_error()) {
+         response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                          "{'error':'cannot parse answer to liteServer.getMasterchainInfo'}");
+      } else {
+        auto f = F.move_as_ok();
+        auto blk_id = create_block_id(f->last_);
+        auto zstate_id = create_zero_state_id(f->init_);
+        response -> write("{'result':'" + blk_id.to_str() + "'}");
+        td::actor::send_closure_later(Self, &TestNode::got_server_mc_block_id, blk_id, zstate_id);
+      }
+    }
+  });
 }
 
 bool TestNode::request_block(ton::BlockIdExt blkid) {
@@ -2017,7 +2041,6 @@ void run_web_server(td::actor::Scheduler* scheduler, td::actor::ActorOwn<TestNod
                                                                           std::shared_ptr<HttpServer::Request> request) {
     std::string address = request -> path_match[1].str();
     std::string block = request -> path_match[2].str();
-    LOG(INFO)<<address<<"\t\t\t"<<block;
     std::thread work_thread([response, scheduler, x, address, block] {
       scheduler -> run_in_context([&] {
         td::actor::send_closure(x -> get(), &TestNode::get_account_state_web, address, block, response);
@@ -2033,6 +2056,17 @@ void run_web_server(td::actor::Scheduler* scheduler, td::actor::ActorOwn<TestNod
     std::thread work_thread([response, scheduler, x, blkid_str] {
       scheduler -> run_in_context([&] {
         td::actor::send_closure(x -> get(), &TestNode::get_block_web, blkid_str, response, true);
+      });
+    });
+    work_thread.detach();
+  };
+  //
+  // get last
+  server.resource["^/last$"]["GET"] = [scheduler, x](std::shared_ptr<HttpServer::Response> response,
+                                                                          std::shared_ptr<HttpServer::Request> request) {
+    std::thread work_thread([response, scheduler, x] {
+      scheduler -> run_in_context([&] {
+        td::actor::send_closure(x -> get(), &TestNode::get_server_mc_block_id_web, response);
       });
     });
     work_thread.detach();
