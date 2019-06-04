@@ -94,7 +94,8 @@ class TestNode : public td::actor::Actor {
   void got_account_state(ton::BlockIdExt ref_blk, ton::BlockIdExt blk, ton::BlockIdExt shard_blk,
                          td::BufferSlice shard_proof, td::BufferSlice proof, td::BufferSlice state,
                          ton::WorkchainId workchain, ton::StdSmcAddress addr);
-  void got_account_state_web(ton::BlockIdExt blk, ton::BlockIdExt shard_blk, td::BufferSlice shard_proof,
+  void got_account_state_web(ton::BlockIdExt ref_blk,ton::BlockIdExt blk, ton::BlockIdExt shard_blk,
+                             td::BufferSlice shard_proof,
                              td::BufferSlice proof, td::BufferSlice state, ton::WorkchainId workchain,
                              ton::StdSmcAddress addr, std::shared_ptr<HttpServer::Response> response);
   bool get_all_shards(bool use_last = true, ton::BlockIdExt blkid = {});
@@ -180,7 +181,7 @@ class TestNode : public td::actor::Actor {
 
   // web server methods
   void get_server_time_web(std::shared_ptr<HttpServer::Response> response);
-  void get_account_state_web(std::string address, std::shared_ptr<HttpServer::Response> response);
+  void get_account_state_web(std::string address, std::string ref_blkid_str, std::shared_ptr<HttpServer::Response> response);
   void get_block_web(std::string blkid_str, std::shared_ptr<HttpServer::Response> response, bool dump = true);
 
   TestNode() {
@@ -279,14 +280,14 @@ bool TestNode::envelope_send_web(td::BufferSlice query,
                                  std::shared_ptr<HttpServer::Response> response) {
   if (!ready_ || client_.empty()) {
     response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
-                      "failed to send query to server: not ready");
+                      "{'error':'failed to send query to server: not ready'}");
     return false;
   }
   auto P = td::PromiseCreator::lambda([promise = std::move(promise), response](td::Result<td::BufferSlice> R) mutable {
     if (R.is_error()) {
       auto err = R.move_as_error();
       response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
-                        "failed query");
+                        "{'error':'failed query'}");
       promise.set_error(std::move(err));
       return;
     }
@@ -296,7 +297,7 @@ bool TestNode::envelope_send_web(td::BufferSlice query,
       auto f = F.move_as_ok();
       auto err = td::Status::Error(f->code_, f->message_);
       response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
-                        "received error");
+                        "{'error':'received error'}");
       promise.set_error(std::move(err));
       return;
     }
@@ -914,7 +915,6 @@ bool TestNode::get_account_state(ton::WorkchainId workchain, ton::StdSmcAddress 
   LOG(INFO) << "requesting account state for " << workchain << ":" << addr.to_hex() << " with respect to "
             << ref_blkid.to_str();
   return envelope_send_query(
-      std::move(b), [ Self = actor_id(this), workchain, addr ](td::Result<td::BufferSlice> R)->void {
       std::move(b), [ Self = actor_id(this), workchain, addr, ref_blkid ](td::Result<td::BufferSlice> R)->void {
         if (R.is_error()) {
           return;
@@ -931,18 +931,29 @@ bool TestNode::get_account_state(ton::WorkchainId workchain, ton::StdSmcAddress 
       });
 }
 
-void TestNode::get_account_state_web(std::string address, std::shared_ptr<HttpServer::Response> response) {
+void TestNode::get_account_state_web(std::string address, std::string ref_blkid_str, std::shared_ptr<HttpServer::Response> response) {
   ton::WorkchainId workchain = ton::masterchainId;  // change to basechain later
   ton::StdSmcAddress addr;
-  if (!TestNode::parse_account_addr(address, workchain, addr)){
+  ton::BlockIdExt ref_blkid;
+  if (!block::parse_std_account_addr(address, workchain, addr)){
     response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
                       "{'error':'parse_account_addr fail'}");
     return;
   }
+  if ( !ref_blkid_str.length()){
+    ref_blkid = mc_last_id_;
+  }
+  else if (!TestNode::parse_block_id_ext(ref_blkid_str, ref_blkid)){
+    response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                      "{'error':'parse_block_id_ext fail'}");
+    LOG(ERROR) << "parse_block_id_ext fail";
+    return;
+  }
 
-  if (!mc_last_id_.is_valid()) {
+  if (!ref_blkid.is_valid()) {
     response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
                       "{'error':'must obtain last block information before making other queries'}");
+    LOG(ERROR) << "must obtain last block information before making other queries";
     return;
   }
   if (!(ready_ && !client_.empty())) {
@@ -952,24 +963,27 @@ void TestNode::get_account_state_web(std::string address, std::shared_ptr<HttpSe
   }
 
   auto a = ton::create_tl_object<ton::ton_api::liteServer_accountId>(workchain, ton::Bits256_2_UInt256(addr));
-  auto b = ton::serialize_tl_object(ton::create_tl_object<ton::ton_api::liteServer_getAccountState>(
-                                        ton::create_tl_block_id(mc_last_id_), std::move(a)),
-                                    true);
+  auto b = ton::serialize_tl_object(
+      ton::create_tl_object<ton::ton_api::liteServer_getAccountState>(ton::create_tl_block_id(ref_blkid), std::move(a)),
+      true);
 
   envelope_send_web(
-    std::move(b), [Self = actor_id(this), workchain, addr, response](td::Result<td::BufferSlice> R) -> void {
+    std::move(b), [Self = actor_id(this), workchain, addr, ref_blkid, response](td::Result<td::BufferSlice> R) -> void {
       if (R.is_error()) {
         response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
                           "{'error':'Unknown Error'}");
+        LOG(ERROR) << "Unknown Error";
         return;
       }
       auto F = ton::fetch_tl_object<ton::ton_api::liteServer_accountState>(R.move_as_ok(), true);
       if (F.is_error()) {
         response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
                           "{'error':'cannot parse answer to liteServer.getAccountState'}");
+        LOG(ERROR) << "cannot parse answer to liteServer.getAccountState";
+        return;
       } else {
         auto f = F.move_as_ok();
-        td::actor::send_closure_later(Self, &TestNode::got_account_state_web, ton::create_block_id(f->id_),
+        td::actor::send_closure_later(Self, &TestNode::got_account_state_web, ref_blkid, ton::create_block_id(f->id_),
                                       ton::create_block_id(f->shardblk_), std::move(f->shard_proof_),
                                       std::move(f->proof_), std::move(f->state_), workchain, addr, response);
       }
@@ -1219,6 +1233,209 @@ void TestNode::got_account_state(ton::BlockIdExt ref_blk, ton::BlockIdExt blk, t
   }
 }
 
+void TestNode::got_account_state_web(ton::BlockIdExt ref_blk, ton::BlockIdExt blk, ton::BlockIdExt shard_blk, td::BufferSlice shard_proof,
+                                     td::BufferSlice proof, td::BufferSlice state, ton::WorkchainId workchain,
+                                     ton::StdSmcAddress addr, std::shared_ptr<HttpServer::Response> response) {
+  Ref<vm::Cell> root;
+  if (!state.empty()) {
+    auto R = vm::std_boc_deserialize(state.clone());
+    if (R.is_error()) {
+      response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'cannot deserialize account state'}");
+      return;
+    }
+    root = R.move_as_ok();
+    CHECK(root.not_null());
+  }
+  if (blk != ref_blk) {
+    response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'obtained getAccountState() for a different reference block " + blk.to_str() +\
+                " instead of requested " + ref_blk.to_str()+"'}");
+    return;
+  }
+  if (!shard_blk.is_valid_full()) {
+    response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'shard block id " + shard_blk.to_str() + " in answer is invalid'}");
+    return;
+  }
+  if (!ton::shard_contains(shard_blk.shard_full(), ton::extract_addr_prefix(workchain, addr))) {
+    std::stringstream error;
+    error << "{'error':'received data from shard block " << shard_blk.to_str() <<  " that cannot contain requested account " <<\
+                workchain << ":" << addr.to_hex() << "'}";
+    response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, error.str());
+    return;
+  }
+  if (blk != shard_blk) {
+    if (!blk.is_masterchain() || !blk.is_valid_full()) {
+      response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'reference block " + blk.to_str() + " for a getAccountState query must belong to the masterchain'}");
+      return;
+    }
+    auto P = vm::std_boc_deserialize_multi(std::move(shard_proof));
+    if (P.is_error()) {
+      response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'cannot deserialize shard configuration proof'}");
+      return;
+    }
+    auto P_roots = P.move_as_ok();
+    if (P_roots.size() != 2) {
+      response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'shard configuration proof must have exactly two roots'}");
+      return;
+    }
+    try {
+      auto mc_state_root = vm::MerkleProof::virtualize(std::move(P_roots[1]), 1);
+      if (mc_state_root.is_null()) {
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'shard configuration proof is invalid'}");
+        return;
+      }
+      ton::Bits256 mc_state_hash = mc_state_root->get_hash().bits();
+      auto res1 =
+          check_block_header_proof(vm::MerkleProof::virtualize(std::move(P_roots[0]), 1), blk, &mc_state_hash, true);
+      if (res1.is_error()) {
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'error in shard configuration block header proof : " + res1.move_as_error().to_string() + "'}");
+        return;
+      }
+      block::gen::ShardStateUnsplit::Record sstate;
+      if (!(tlb::unpack_cell(mc_state_root, sstate))) {
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'cannot unpack masterchain state header'}");
+        return;
+      }
+      auto shards_dict = block::Config::extract_shard_hashes_dict(std::move(mc_state_root));
+      if (!shards_dict) {
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'cannot extract shard configuration dictionary from proof'}");
+        return;
+      }
+      vm::CellSlice cs;
+      ton::ShardIdFull true_shard;
+      if (!block::ShardConfig::get_shard_hash_raw_from(*shards_dict, cs, shard_blk.shard_full(), true_shard)) {
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'masterchain state contains no information for shard " + shard_blk.shard_full().to_str() + "'}");
+        return;
+      }
+      auto shard_info = block::McShardHash::unpack(cs, true_shard);
+      if (shard_info.is_null()) {
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'cannot unpack information for shard " + shard_blk.shard_full().to_str() +\
+                                  " from masterchain state'}");
+        return;
+      }
+      if (shard_info->top_block_id() != shard_blk) {
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'shard configuration mismatch: expected to find block " + shard_blk.to_str() + " , found " +\
+                   shard_info->top_block_id().to_str() + "'}");
+        return;
+      }
+    } catch (vm::VmError err) {
+        std::stringstream error;
+        error << "{'error':'error while traversing shard configuration proof : " << err.get_msg() << "'}";
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,  error.str());
+      return;
+    } catch (vm::VmVirtError err) {
+        std::stringstream error;
+        error <<"{'error':'virtualization error while traversing shard configuration proof : " << err.get_msg() << "'}";
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, error.str());
+      return;
+    }
+  }
+  auto Q = vm::std_boc_deserialize_multi(std::move(proof));
+  if (Q.is_error()) {
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'cannot deserialize account proof'}");
+    return;
+  }
+  auto Q_roots = Q.move_as_ok();
+  if (Q_roots.size() != 2) {
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'account state proof must have exactly two roots'}");
+    return;
+  }
+  ton::LogicalTime last_trans_lt = 0;
+  ton::Bits256 last_trans_hash;
+  last_trans_hash.set_zero();
+  try {
+    auto state_root = vm::MerkleProof::virtualize(std::move(Q_roots[1]), 1);
+    if (state_root.is_null()) {
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'account state proof is invalid'}");
+      return;
+    }
+    ton::Bits256 state_hash = state_root->get_hash().bits();
+    auto res1 =
+        check_block_header_proof(vm::MerkleProof::virtualize(std::move(Q_roots[0]), 1), shard_blk, &state_hash, true);
+    if (res1.is_error()) {
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'error in account shard block header proof : " + res1.move_as_error().to_string() +"'}");
+      return;
+    }
+    block::gen::ShardStateUnsplit::Record sstate;
+    if (!(tlb::unpack_cell(std::move(state_root), sstate))) {
+         response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'cannot unpack state header'}");
+      return;
+    }
+    vm::AugmentedDictionary accounts_dict{sstate.accounts->prefetch_ref(), 256, block::tlb::aug_ShardAccounts};
+    auto acc_csr = accounts_dict.lookup(addr);
+    if (acc_csr.not_null()) {
+      if (root.is_null()) {
+         std::stringstream error;
+         error << "{'error':'account state proof shows that account state for " << workchain << ":" << addr.to_hex() <<\
+                    " must be non-empty, but it actually is empty'}";
+         response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, error.str());
+        return;
+      }
+      block::gen::ShardAccount::Record acc_info;
+      if (!tlb::csr_unpack(std::move(acc_csr), acc_info)) {
+         response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'cannot unpack ShardAccount from proof'}");
+        return;
+      }
+      if (acc_info.account->get_hash().bits().compare(root->get_hash().bits(), 256)) {
+         response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
+                        "{'error':'account state hash mismatch: Merkle proof expects "\
+                   + acc_info.account->get_hash().bits().to_hex(256) + " but received data has "\
+                   + root->get_hash().bits().to_hex(256)+"'}");
+        return;
+      }
+      last_trans_hash = acc_info.last_trans_hash;
+      last_trans_lt = acc_info.last_trans_lt;
+    } else if (root.not_null()) {
+         std::stringstream error;
+         error << "{'error':'account state proof shows that account state for " << workchain << ":" << addr.to_hex() <<\
+                 " must be empty, but it is not'}";
+         response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, error.str());
+      return;
+    }
+  } catch (vm::VmError err) {
+         std::stringstream error;
+         error <<"{'error':'error while traversing account proof : " << err.get_msg() << "'}";
+         response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, error.str());
+    return;
+  } catch (vm::VmVirtError err) {
+         std::stringstream error;
+         error << "{'error':'virtualization error while traversing account proof : " << err.get_msg() << "'}";
+         response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, error.str());
+    return;
+  }
+  if (root.not_null()) {
+    std::ostringstream account_outp, vm_outp, ltlt;
+    block::gen::t_Account.print_ref(account_outp, root);
+    vm::load_cell_slice(root).print_rec(vm_outp);
+    ltlt<<last_trans_lt;
+    response -> write("{'result':{'account':'"+account_outp.str()+\
+                              "', 'vm':'"+vm_outp.str()+\
+                              "', 'last_transaction_logical_time':"+ltlt.str()+\
+                               ", 'last_transaction_hash':'"+last_trans_hash.to_hex()+"'}");
+  } else {
+    response -> write("{'error':'account state is empty'}");
+  }
+
+}
+
 void TestNode::got_one_transaction(ton::BlockIdExt req_blkid, ton::BlockIdExt blkid, td::BufferSlice proof,
                                    td::BufferSlice transaction, ton::WorkchainId workchain, ton::StdSmcAddress addr,
                                    ton::LogicalTime trans_lt, bool dump) {
@@ -1253,27 +1470,6 @@ void TestNode::got_one_transaction(ton::BlockIdExt req_blkid, ton::BlockIdExt bl
     block::gen::t_Transaction.print_ref(outp, root);
     vm::load_cell_slice(root).print_rec(outp);
     out << outp.str();
-  }
-}
-
-void TestNode::got_account_state_web(ton::BlockIdExt blk, ton::BlockIdExt shard_blk, td::BufferSlice shard_proof,
-                                     td::BufferSlice proof, td::BufferSlice state, ton::WorkchainId workchain,
-                                     ton::StdSmcAddress addr, std::shared_ptr<HttpServer::Response> response) {
-  if (state.empty()) {
-    response -> write("{'error':'account state is empty'}");
-  } else {
-    auto R = vm::std_boc_deserialize(state.clone());
-    if (R.is_error()) {
-      response -> write(SimpleWeb::StatusCode::server_error_internal_server_error,
-                        "{'error':'cannot deserialize account state'}");
-      return;
-    }
-    auto root = R.move_as_ok();
-    std::ostringstream outp;
-    block::gen::t_Account.print_ref(outp, root);
-    vm::load_cell_slice(root).print_rec(outp);
-
-    response -> write("{'result':'"+outp.str()+"'}");
   }
 }
 
@@ -1811,7 +2007,20 @@ void run_web_server(td::actor::Scheduler* scheduler, td::actor::ActorOwn<TestNod
 
     std::thread work_thread([response, scheduler, x, address] {
       scheduler -> run_in_context([&] {
-        td::actor::send_closure(x -> get(), &TestNode::get_account_state_web, address, response);
+        td::actor::send_closure(x -> get(), &TestNode::get_account_state_web, address, "", response);
+      });
+    });
+    work_thread.detach();
+  };
+  // get a account at block
+  server.resource["^/getaccount_at_block/([\\w\\-:]+)/([\\w\\-:\\(\\),]+)$"]["GET"] = [scheduler, x](std::shared_ptr<HttpServer::Response> response,
+                                                                          std::shared_ptr<HttpServer::Request> request) {
+    std::string address = request -> path_match[1].str();
+    std::string block = request -> path_match[2].str();
+    LOG(INFO)<<address<<"\t\t\t"<<block;
+    std::thread work_thread([response, scheduler, x, address, block] {
+      scheduler -> run_in_context([&] {
+        td::actor::send_closure(x -> get(), &TestNode::get_account_state_web, address, block, response);
       });
     });
     work_thread.detach();
