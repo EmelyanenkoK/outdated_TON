@@ -1450,7 +1450,7 @@ void TestNode::got_account_state_web(ton::BlockIdExt ref_blk, ton::BlockIdExt bl
     block::gen::t_Account.print_ref(account_outp, root);
     vm::load_cell_slice(root).print_rec(vm_outp);
     ltlt<<last_trans_lt;
-    response -> write("{\"result':{\"account\":\""+account_outp.str()+\
+    response -> write("{\"result\":{\"account\":\""+account_outp.str()+\
                               "\", \"vm\":\""+vm_outp.str()+\
                               "\", \"last_transaction_logical_time\":"+ltlt.str()+\
                                ", \"last_transaction_hash\":\""+last_trans_hash.to_hex()+"\"}}");
