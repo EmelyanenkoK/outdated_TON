@@ -1619,7 +1619,7 @@ void TestNode::get_all_shards_web(std::shared_ptr<HttpServer::Response> response
 
 void TestNode::got_all_shards_web(ton::BlockIdExt blk, td::BufferSlice proof, td::BufferSlice data, std::shared_ptr<HttpServer::Response> response) {
   std::ostringstream out;
-  out << "{";
+  out << "{'result':{";
   out << "\"block_id\":\""<<blk.to_str()<<"\", ";
   out << "\"shard_configuration\": ";
   if (data.empty()) {
@@ -1669,7 +1669,7 @@ void TestNode::got_all_shards_web(ton::BlockIdExt blk, td::BufferSlice proof, td
            "\",\"shards_list\":"<<outp_shards_simple.str()<<"}";
     }
   }
-  out << "}";
+  out << "}}";
   response -> write(out.str());
 }
 
