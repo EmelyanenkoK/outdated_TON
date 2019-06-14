@@ -185,7 +185,7 @@ class TestNode : public td::actor::Actor {
   void get_account_state_web(std::string address, std::string ref_blkid_str, std::shared_ptr<HttpServer::Response> response);
   void get_block_web(std::string blkid_str, std::shared_ptr<HttpServer::Response> response, bool dump = true);
   void get_server_mc_block_id_web(std::shared_ptr<HttpServer::Response> response);
-  void get_all_shards_web(bool use_last = true, std::shared_ptr<HttpServer::Response> response, std::string blkid_str = "");
+  void get_all_shards_web(std::shared_ptr<HttpServer::Response> response, bool use_last = true, std::string blkid_str = "");
   TestNode() {
   }
 
@@ -1568,7 +1568,7 @@ void TestNode::got_all_shards(ton::BlockIdExt blk, td::BufferSlice proof, td::Bu
   show_new_blkids();
 }
 
-void TestNode::get_all_shards_web(bool use_last, std::shared_ptr<HttpServer::Response> response, std::string blkid_str) {
+void TestNode::get_all_shards_web(std::shared_ptr<HttpServer::Response> response, bool use_last, std::string blkid_str) {
   ton::BlockIdExt blkid;
   if (use_last) {
     blkid = mc_last_id_;
@@ -1611,7 +1611,7 @@ void TestNode::get_all_shards_web(bool use_last, std::shared_ptr<HttpServer::Res
                            "{\"error\":\"cannot parse answer to liteServer.getAllShardsInfo\"}");
     } else {
       auto f = F.move_as_ok();
-      td::actor::send_closure_later(Self, &TestNode::got_all_shards, ton::create_block_id(f->id_), std::move(f->proof_),
+      td::actor::send_closure_later(Self, &TestNode::got_all_shards_web, ton::create_block_id(f->id_), std::move(f->proof_),
                                     std::move(f->data_), response);
     }
   });
@@ -1641,33 +1641,35 @@ void TestNode::got_all_shards_web(ton::BlockIdExt blk, td::BufferSlice proof, td
     } else {
       auto ids = sh_conf.get_shard_hash_ids(true);
       int cnt = 0;
-      outp_shards_simple << "["
+      outp_shards_simple << "[";
       bool was_shard = false;
       for (auto id : ids) {
         if(was_shard)
-          {outp_shards_simple<<", "}
+          {outp_shards_simple<<", ";}
         std::ostringstream current_shard;
         current_shard<<"{";
 
         auto ref = sh_conf.get_shard_hash(ton::ShardIdFull(id));
         if (ref.not_null()) {
           register_blkid(ref->top_block_id());
-          current_shard<<"\"block_id\":\""<<ref->top_block_id().to_str()"\",";
-          current_shard<<"\"gen_time\":"<<ref->created_at()",";
-          current_shard<<"\"start_lt\":"<<ref->start_lt()",";
-          current_shard<<"\"end_lt\":"<<ref->end_lt()"";
-          current_shard<<"}"
+          current_shard<<"\"block_id\":\""<<ref->top_block_id().to_str()<<"\",";
+          current_shard<<"\"gen_time\":"<<ref->created_at()<<",";
+          current_shard<<"\"start_lt\":"<<ref->start_lt()<<",";
+          current_shard<<"\"end_lt\":"<<ref->end_lt();
+          current_shard<<"}";
         } else {
-          current_shard<<"\"block_id\":\""<<ref->top_block_id().to_str()"\"}";
+          current_shard<<"\"block_id\":\""<<ref->top_block_id().to_str()<<"\"}";
         }
         was_shard = true;
         outp_shards_simple<<current_shard.str();
       }
+      outp_shards_simple << "]";
       out<< "{ \"shards_info\":\""<<outp_shards.str()<< \
           "\", \"vm\":\""<< outp_vm.str()<< \
-           "\",\"shards_list\":\""<<outp_shards_simple.str()<<"\"}";
+           "\",\"shards_list\":"<<outp_shards_simple.str()<<"}";
     }
   }
+  out << "}";
   response -> write(out.str());
 }
 
@@ -2037,13 +2039,13 @@ bool TestNode::give_block_header_description(std::ostringstream& out, ton::Block
     LOG(ERROR) << "cannot unpack header for block " << blkid.to_str();
     return false;
   }
-  out << "{"
+  out << "{";
   out << "  'block_id':'"<<blkid.to_str()<<"', ";
   out << "  'gen_time':"<<info.gen_utime<<", ";
   out << "  'start_lt':"<<info.start_lt<<", ";
   out << "  'end_lt':"<<info.end_lt<<", ";
 
-  out << "  'global_id':"<<info.global_id<<", ";
+  out << "  'global_id':"<<blk.global_id<<", ";
   out << "  'version':"<<info.version<<", ";
   out << "  'not_master':"<<info.not_master<<", ";
   out << "  'after_merge':"<<info.after_merge<<", ";
@@ -2052,19 +2054,19 @@ bool TestNode::give_block_header_description(std::ostringstream& out, ton::Block
   out << "  'want_merge':"<<info.want_merge<<", ";
   out << "  'want_split':"<<info.want_split<<", ";
   out << "  'gen_validator_list_hash_short':"<<info.gen_validator_list_hash_short<<", ";
-  out << "  'catchain_seqno':"<<info.catchain_seqno<<", ";
+  out << "  'catchain_seqno':"<<info.gen_catchain_seqno<<", ";
   out << "  'min_ref_mc_seqno':"<<info.min_ref_mc_seqno<<", ";
 
-  out << "  'prev_blocks': ["
+  out << "  'prev_blocks': [";
   int was_block = false;
   for (auto id : prev) {
-    if(was_block) out << ", "
+    if(was_block){out << ", ";}
     out << "'"<< id.to_str() << "'";
     was_block = true;
   }
-  out << "  ], "
+  out << "  ], ";
   out << "'reference_masterchain_block' : '" << mc_blkid.to_str() << "'";
-  out << "}"
+  out << "}";
   return true;
 }
 
@@ -2198,7 +2200,7 @@ void run_web_server(td::actor::Scheduler* scheduler, td::actor::ActorOwn<TestNod
                                                                           std::shared_ptr<HttpServer::Request> request) {
     std::thread work_thread([response, scheduler, x] {
       scheduler -> run_in_context([&] {
-        td::actor::send_closure(x -> get(), &TestNode::get_all_shards_web, true, response);
+        td::actor::send_closure(x -> get(), &TestNode::get_all_shards_web, response, true, "");
       });
     });
     work_thread.detach();
@@ -2210,7 +2212,7 @@ void run_web_server(td::actor::Scheduler* scheduler, td::actor::ActorOwn<TestNod
     std::string blkid_str = request -> path_match[1].str();
     std::thread work_thread([response, scheduler, x, blkid_str] {
       scheduler -> run_in_context([&] {
-        td::actor::send_closure(x -> get(), &TestNode::get_all_shards_web, false, response, blkid_str);
+        td::actor::send_closure(x -> get(), &TestNode::get_all_shards_web, response, false, blkid_str);
       });
     });
     work_thread.detach();
