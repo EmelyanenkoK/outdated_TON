@@ -1703,7 +1703,7 @@ void TestNode::got_block_web(ton::BlockIdExt blkid, td::BufferSlice data, bool d
     give_block_header_description(header_data, blkid, std::move(root), 0xffff);
     response -> write("{\"result\": {\"block\":\""+block_data.str()+
                                "\", \"vm\":\""+vm_data.str()+
-                               "\", \"header\":\""+header_data.str()+"\"}}");    
+                               "\", \"header\":"+header_data.str()+"}}");    
   } else {
     auto res = lazy_boc_deserialize(data.clone());
     if (res.is_error()) {
@@ -1933,18 +1933,34 @@ bool TestNode::give_block_header_description(std::ostringstream& out, ton::Block
     LOG(ERROR) << "cannot unpack header for block " << blkid.to_str();
     return false;
   }
-  out << "block header of " << blkid.to_str() << " @ " << info.gen_utime << " lt " << info.start_lt << " .. "
-      << info.end_lt << std::endl;
-  out << "global_id=" << blk.global_id << " version=" << info.version << " not_master=" << info.not_master
-      << " after_merge=" << info.after_merge << " after_split=" << info.after_split
-      << " before_split=" << info.before_split << " want_merge=" << info.want_merge << " want_split=" << info.want_split
-      << " validator_list_hash_short=" << info.gen_validator_list_hash_short
-      << " catchain_seqno=" << info.gen_catchain_seqno << " min_ref_mc_seqno=" << info.min_ref_mc_seqno << std::endl;
-  int cnt = 0;
+  out << "{"
+  out << "  'block_id':'"<<blkid.to_str()<<"', ";
+  out << "  'gen_time':"<<info.gen_utime<<", ";
+  out << "  'start_lt':"<<info.start_lt<<", ";
+  out << "  'end_lt':"<<info.end_lt<<", ";
+
+  out << "  'global_id':"<<info.global_id<<", ";
+  out << "  'version':"<<info.version<<", ";
+  out << "  'not_master':"<<info.not_master<<", ";
+  out << "  'after_merge':"<<info.after_merge<<", ";
+  out << "  'after_split':"<<info.after_split<<", ";
+  out << "  'before_split':"<<info.before_split<<", ";
+  out << "  'want_merge':"<<info.want_merge<<", ";
+  out << "  'want_split':"<<info.want_split<<", ";
+  out << "  'gen_validator_list_hash_short':"<<info.gen_validator_list_hash_short<<", ";
+  out << "  'catchain_seqno':"<<info.catchain_seqno<<", ";
+  out << "  'min_ref_mc_seqno':"<<info.min_ref_mc_seqno<<", ";
+
+  out << "  'prev_blocks': ["
+  int was_block = false;
   for (auto id : prev) {
-    out << "previous block #" << ++cnt << " : " << id.to_str() << std::endl;
+    if(was_block) out << ", "
+    out << "'"<< id.to_str() << "'";
+    was_block = true;
   }
-  out << "reference masterchain block : " << mc_blkid.to_str() << std::endl;
+  out << "  ], "
+  out << "'reference_masterchain_block' : '" << mc_blkid.to_str() << "'";
+  out << "}"
   return true;
 }
 
