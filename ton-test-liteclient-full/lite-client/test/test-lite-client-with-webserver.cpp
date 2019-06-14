@@ -100,6 +100,7 @@ class TestNode : public td::actor::Actor {
                              ton::StdSmcAddress addr, std::shared_ptr<HttpServer::Response> response);
   bool get_all_shards(bool use_last = true, ton::BlockIdExt blkid = {});
   void got_all_shards(ton::BlockIdExt blk, td::BufferSlice proof, td::BufferSlice data);
+  void got_all_shards_web(ton::BlockIdExt blk, td::BufferSlice proof, td::BufferSlice data, std::shared_ptr<HttpServer::Response> response);
   bool get_block(ton::BlockIdExt blk, bool dump = false);
   void got_block(ton::BlockIdExt blkid, td::BufferSlice data, bool dump);
   void got_block_web(ton::BlockIdExt blkid, td::BufferSlice data, bool dump, std::shared_ptr<HttpServer::Response> response);
@@ -184,7 +185,7 @@ class TestNode : public td::actor::Actor {
   void get_account_state_web(std::string address, std::string ref_blkid_str, std::shared_ptr<HttpServer::Response> response);
   void get_block_web(std::string blkid_str, std::shared_ptr<HttpServer::Response> response, bool dump = true);
   void get_server_mc_block_id_web(std::shared_ptr<HttpServer::Response> response);
-
+  void get_all_shards_web(bool use_last = true, std::shared_ptr<HttpServer::Response> response, std::string blkid_str = "");
   TestNode() {
   }
 
@@ -1567,6 +1568,109 @@ void TestNode::got_all_shards(ton::BlockIdExt blk, td::BufferSlice proof, td::Bu
   show_new_blkids();
 }
 
+void TestNode::get_all_shards_web(bool use_last, std::shared_ptr<HttpServer::Response> response, std::string blkid_str) {
+  ton::BlockIdExt blkid;
+  if (use_last) {
+    blkid = mc_last_id_;
+  } 
+  else {
+    
+    if(!TestNode::parse_block_id_ext(blkid_str, blkid, true))
+        {  response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, 
+                           "{\"error\":\"cannot parse block_id\"}");   
+           return;   
+        }
+  }
+  if (!blkid.is_valid_full()) {
+    if (use_last) {
+      response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, 
+                           "{\"error\":\"must obtain last block information before making other queries\"}"); 
+    } else {
+      response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, 
+                           "{\"error\":\"invalid masterchain block id\"}"); 
+    }
+  }
+  if (!blkid.is_masterchain()) {
+      response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, 
+                           "{\"error\":\"only masterchain blocks contain shard configuration\"}"); 
+  }
+  if (!(ready_ && !client_.empty())) {
+      response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, 
+                           "{\"error\":\"server connection not ready\"}");
+  }
+  auto b = ton::serialize_tl_object(
+      ton::create_tl_object<ton::ton_api::liteServer_getAllShardsInfo>(ton::create_tl_block_id(blkid)), true);
+  LOG(INFO) << "requesting recent shard configuration";
+  envelope_send_query(std::move(b), [Self = actor_id(this), response](td::Result<td::BufferSlice> R)->void {
+    if (R.is_error()) {
+      return;
+    }
+    auto F = ton::fetch_tl_object<ton::ton_api::liteServer_allShardsInfo>(R.move_as_ok(), true);
+    if (F.is_error()) {
+      response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, 
+                           "{\"error\":\"cannot parse answer to liteServer.getAllShardsInfo\"}");
+    } else {
+      auto f = F.move_as_ok();
+      td::actor::send_closure_later(Self, &TestNode::got_all_shards, ton::create_block_id(f->id_), std::move(f->proof_),
+                                    std::move(f->data_), response);
+    }
+  });
+}
+
+void TestNode::got_all_shards_web(ton::BlockIdExt blk, td::BufferSlice proof, td::BufferSlice data, std::shared_ptr<HttpServer::Response> response) {
+  std::ostringstream out;
+  out << "{";
+  out << "\"block_id\":\""<<blk.to_str()<<"\", ";
+  out << "\"shard_configuration\": ";
+  if (data.empty()) {
+    out << "\"empty\"}";
+  } else {
+    auto R = vm::std_boc_deserialize(data.clone());
+    if (R.is_error()) {
+      response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, 
+                           "{\"error\":\"cannot deserialize shard configuration\"}");
+      return;
+    }
+    auto root = R.move_as_ok();
+    std::ostringstream outp_shards, outp_vm, outp_shards_simple;
+    block::gen::t_ShardHashes.print_ref(outp_shards, root);
+    vm::load_cell_slice(root).print_rec(outp_vm);
+    block::ShardConfig sh_conf;
+    if (!sh_conf.unpack(vm::load_cell_slice_ref(root))) {
+      outp_shards_simple << "\"cannot extract shard block list from shard configuration\"";
+    } else {
+      auto ids = sh_conf.get_shard_hash_ids(true);
+      int cnt = 0;
+      outp_shards_simple << "["
+      bool was_shard = false;
+      for (auto id : ids) {
+        if(was_shard)
+          {outp_shards_simple<<", "}
+        std::ostringstream current_shard;
+        current_shard<<"{";
+
+        auto ref = sh_conf.get_shard_hash(ton::ShardIdFull(id));
+        if (ref.not_null()) {
+          register_blkid(ref->top_block_id());
+          current_shard<<"\"block_id\":\""<<ref->top_block_id().to_str()"\",";
+          current_shard<<"\"gen_time\":"<<ref->created_at()",";
+          current_shard<<"\"start_lt\":"<<ref->start_lt()",";
+          current_shard<<"\"end_lt\":"<<ref->end_lt()"";
+          current_shard<<"}"
+        } else {
+          current_shard<<"\"block_id\":\""<<ref->top_block_id().to_str()"\"}";
+        }
+        was_shard = true;
+        outp_shards_simple<<current_shard.str();
+      }
+      out<< "{ \"shards_info\":\""<<outp_shards.str()<< \
+          "\", \"vm\":\""<< outp_vm.str()<< \
+           "\",\"shards_list\":\""<<outp_shards_simple.str()<<"\"}";
+    }
+  }
+  response -> write(out.str());
+}
+
 bool TestNode::get_block(ton::BlockIdExt blkid, bool dump) {
   LOG(INFO) << "got block download request for " << blkid.to_str();
   auto b = ton::serialize_tl_object(
@@ -2083,6 +2187,30 @@ void run_web_server(td::actor::Scheduler* scheduler, td::actor::ActorOwn<TestNod
     std::thread work_thread([response, scheduler, x] {
       scheduler -> run_in_context([&] {
         td::actor::send_closure(x -> get(), &TestNode::get_server_mc_block_id_web, response);
+      });
+    });
+    work_thread.detach();
+  };
+  //
+
+  // get shards
+  server.resource["^/shards$"]["GET"] = [scheduler, x](std::shared_ptr<HttpServer::Response> response,
+                                                                          std::shared_ptr<HttpServer::Request> request) {
+    std::thread work_thread([response, scheduler, x] {
+      scheduler -> run_in_context([&] {
+        td::actor::send_closure(x -> get(), &TestNode::get_all_shards_web, true, response);
+      });
+    });
+    work_thread.detach();
+  };
+  //
+  // get shards
+  server.resource["^/shards_at_block/(.+)$"]["GET"] = [scheduler, x](std::shared_ptr<HttpServer::Response> response,
+                                                                          std::shared_ptr<HttpServer::Request> request) {
+    std::string blkid_str = request -> path_match[1].str();
+    std::thread work_thread([response, scheduler, x, blkid_str] {
+      scheduler -> run_in_context([&] {
+        td::actor::send_closure(x -> get(), &TestNode::get_all_shards_web, false, response, blkid_str);
       });
     });
     work_thread.detach();
