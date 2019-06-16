@@ -2129,9 +2129,9 @@ void print_backtrace(int sig) {
 #endif
 
 
-void run_web_server(td::actor::Scheduler* scheduler, td::actor::ActorOwn<TestNode>* x){
+void run_web_server(td::actor::Scheduler* scheduler, td::actor::ActorOwn<TestNode>* x, int port){
   HttpServer server;
-  server.config.port = 8000;
+  server.config.port = port;
 
   // get a time
   server.resource["^/time$"]["GET"] = [scheduler, x](std::shared_ptr<HttpServer::Response> response,
@@ -2241,6 +2241,7 @@ int main(int argc, char* argv[]) {
 
   td::actor::ActorOwn<TestNode> x;
   int autoupdate = 0;
+  int port=8000;
 
   td::OptionsParser p;
   p.set_description("test basic adnl functionality");
@@ -2286,6 +2287,10 @@ int main(int argc, char* argv[]) {
     autoupdate = td::to_integer<int>(arg);
     return td::Status::OK();
   });
+  p.add_option('p', "port", "webserver port", [&](td::Slice arg) {
+    port = td::to_integer<int>(arg);
+    return td::Status::OK();
+  });
   p.add_option('u', "update-on-demand", "update state before each call", [&]() {
     td::actor::send_closure(x, &TestNode::set_update_on_demand, true);
     return td::Status::OK();
@@ -2328,7 +2333,7 @@ int main(int argc, char* argv[]) {
   });
 
   // web server thread
-  std::thread webserver = std::thread(run_web_server, &scheduler, &x);
+  std::thread webserver = std::thread(run_web_server, &scheduler, &x, port);
   // updater thread called 'last' command
   if(autoupdate) {
     std::thread updater = std::thread(run_updater, &scheduler, &x);
