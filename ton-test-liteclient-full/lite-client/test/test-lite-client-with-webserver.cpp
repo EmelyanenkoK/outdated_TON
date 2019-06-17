@@ -47,6 +47,7 @@ class TestNode : public td::actor::Actor {
  private:
   std::string local_config_ = "ton-local.config";
   std::string global_config_ = "ton-global.config";
+  std::string load_files_dir_ ="./"
 
   td::actor::ActorOwn<ton::AdnlExtClient> client_;
   td::actor::ActorOwn<td::TerminalIO> io_;
@@ -169,6 +170,10 @@ class TestNode : public td::actor::Actor {
     update_on_demand_enabled_ = value;
   }
 
+  void set_load_files_dir(std::string str) {
+    load_files_dir_ = str;
+  }
+
   void start_up() override {
   }
   void tear_down() override {
@@ -186,6 +191,8 @@ class TestNode : public td::actor::Actor {
   void get_block_web(std::string blkid_str, std::shared_ptr<HttpServer::Response> response, bool dump = true);
   void get_server_mc_block_id_web(std::shared_ptr<HttpServer::Response> response);
   void get_all_shards_web(std::shared_ptr<HttpServer::Response> response, bool use_last = true, std::string blkid_str = "");
+  void send_ext_msg_from_filename_web(std::string filename, std::shared_ptr<HttpServer::Response> response);
+
   TestNode() {
   }
 
@@ -1738,6 +1745,51 @@ void TestNode::get_block_web(std::string blkid_str, std::shared_ptr<HttpServer::
       });
 }
 
+void TestNode::send_ext_msg_from_filename_web(std::string filename, std::shared_ptr<HttpServer::Response> response) {
+  auto F = td::read_file(load_files_dir_+filename);
+  if (F.is_error()) {
+    auto err = F.move_as_error();
+    response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, \
+                                "{\"error\":\"failed to read file " + filename +\
+                                 ":" + err.to_string()+"\"}");
+    return err;
+  }
+  if (ready_ && !client_.empty()) {
+    auto P = td::PromiseCreator::lambda([response](td::Result<td::BufferSlice> R) {
+      if (R.is_error()) {
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, \
+                                "{\"error\":\"Unknown error\"}");
+        return;
+      }
+      auto F = ton::fetch_tl_object<ton::ton_api::liteServer_sendMsgStatus>(R.move_as_ok(), true);
+      if (F.is_error()) {
+        response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, \
+                                "{\"error\":\"cannot parse answer to liteServer.sendMessage\"}");
+      } else {
+        int status = F.move_as_ok()->status_;
+        LOG(INFO) << "external message status is " << status;
+      }
+    });
+    auto b =
+        ton::serialize_tl_object(ton::create_tl_object<ton::ton_api::liteServer_sendMessage>(F.move_as_ok()), true);
+    result = envelope_send_query(std::move(b), std::move(P)) ? td::Status::OK()
+                                                           : td::Status::Error("cannot send query to server");
+    
+    if (result.is_ok()) {
+     response -> write("{\"result\":\"Ok\"}");
+     return;
+    } else {
+      response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, \
+                                "{\"error\":\""+error.to_string()+"\"}");
+      return;
+    }
+  } else {
+    response -> write(SimpleWeb::StatusCode::server_error_internal_server_error, \
+                                "{\"error\":\"server connection not ready\"}");
+  }
+
+}
+
 bool TestNode::get_state(ton::BlockIdExt blkid, bool dump) {
   LOG(INFO) << "got state download request for " << blkid.to_str();
   auto b = ton::serialize_tl_object(
@@ -2218,6 +2270,18 @@ void run_web_server(td::actor::Scheduler* scheduler, td::actor::ActorOwn<TestNod
     work_thread.detach();
   };
   //
+  // send_file
+  server.resource["^/send_file/[\w\-]+.boc$"]["GET"] = [scheduler, x](std::shared_ptr<HttpServer::Response> response,
+                                                                          std::shared_ptr<HttpServer::Request> request) {
+    std::string file_name = request -> path_match[1].str();
+    std::thread work_thread([response, scheduler, x, file_name] {
+      scheduler -> run_in_context([&] {
+        td::actor::send_closure(x -> get(), &TestNode::send_ext_msg_from_filename_web, file_name, response);
+      });
+    });
+    work_thread.detach();
+  };
+  //
   server.start();
 }
 
@@ -2314,6 +2378,10 @@ int main(int argc, char* argv[]) {
 
     dup2(FileLog.get_native_fd().fd(), 1);
     dup2(FileLog.get_native_fd().fd(), 2);
+    return td::Status::OK();
+  });
+  p.add_option('l', "load-files-dir", "base directory from which files for sending to network will be loaded", [&](td::Slice fname) {
+    td::actor::send_closure(x, &TestNode::set_load_files_dir, fname.str());
     return td::Status::OK();
   });
   td::set_signal_handler(td::SignalType::Abort, print_backtrace).ensure();
